@@ -1,4 +1,18 @@
-%define __jar_repack 0
+# Disable the stupid stuff rpm distros include in the build process by default:
+<% %w(prep build install clean).each do |step| -%>
+<%# These definitions have to be non-empty... I guess... -%>
+#   Disable any <%= step %> shell actions. replace them with simply 'true'
+%define __spec_<%= step %>_post true
+%define __spec_<%= step %>_pre true
+<% end -%>
+# Disable checking for unpackaged files ?
+#%undefine __check_files
+
+# Use <%= attributes[:rpm_digest] %> file digest method
+%define _binary_filedigest_algorithm <%= digest_algorithm %>
+
+# Use <%= attributes[:rpm_compression] %> payload compression
+%define _binary_payload <%= payload_compression %> 
 
 Name: <%= name %>
 Version: <%= version %>
@@ -10,24 +24,24 @@ Release: <%= iteration or 1 %>
 Summary: <%= description.split("\n").first.empty? ? "_" :  description.split("\n").first %>
 BuildArch: <%= architecture %>
 AutoReqProv: no
+# Seems specifying BuildRoot is required on older rpmbuild (like on CentOS 5)
+# fpm passes '--define buildroot ...' on the commandline, so just reuse that.
+BuildRoot: %buildroot
 
 Group: <%= category %>
-<%#
-TODO: [Jay] rpms require a license
-let's detect it intelligently
--%>
 License: <%= license %>
+Vendor: <%= vendor %>
 URL: <%= url or "http://nourlgiven.example.com/" %>
-Source0:  %{_sourcedir}/data.tar.gz
-BuildRoot: %(mktemp -ud %{_tmppath}/%{name}-%{version}-%{release}-XXXXXX)
+Packager: <%= maintainer %>
 
-<% if !dependencies.empty? -%>
-<%
-  properdeps =  dependencies.collect { |d| fix_dependency(d) }
--%>Requires: <%= properdeps.join(", ") %>
+<% dependencies.each do |req| -%>
+Requires: <%= req %>
 <% end -%>
 <% provides.each do |prov| -%>
 Provides: <%= prov %>
+<% end -%>
+<% conflicts.each do |conflict| -%>
+Conflicts: <%= conflict %>
 <% end -%>
 <% replaces.each do |repl| -%>
 <%# The closes equivalent in RPM to "replaces" is "Obsoletes" -%>
@@ -45,38 +59,63 @@ Obsoletes: <%= repl %>
 # noop
 
 %install
-# some rpm implementations delete the build dir and then recreate it by
-# default, for some reason. Whatever, let's work around it.
-cd $RPM_BUILD_ROOT
-tar -zxf %SOURCE0
+<% files.each do |path| -%>
+<%   source = Shellwords.shellescape(File.join(staging_path, path)) -%>
+<%   # Copy to the build_path/BUILD/ to make rpmbuild happy -%>
+<%   target = Shellwords.shellescape(File.join(build_path, "BUILD", path)) -%>
+<%   dir = File.dirname(target) %>
+mkdir -p <%= dir %>
+if [ -f <%= source %> ] || [ -h <%= source %> ] ; then
+  cp -d <%= source %> <%= target %>
+elif [ -d <%= source %> ] ; then
+  mkdir <%= target %>
+fi
+<% end %>
 
 %clean
-rm -rf $RPM_BUILD_ROOT
+# noop
 
-<% if scripts["pre-install"] -%>
+<% if scripts[:before_install] -%>
 %pre
-<%= File.read(scripts["pre-install"]) %>
+<%= scripts[:before_install] %>
 
 <% end -%>
-<% if scripts["post-install"] -%>
+<% if scripts[:after_install] -%>
 %post
-<%= File.read(scripts["post-install"]) %>
+<%= scripts[:after_install] %>
 
 <% end -%>
-<% if scripts["pre-uninstall"] -%>
+<% if scripts[:before_remove] -%>
 %preun
-<%= File.read(scripts["pre-uninstall"]) %>
+<%= scripts[:before_remove] %>
 
 <% end -%>
-<% if scripts["post-uninstall"] -%>
+<% if scripts[:after_remove] -%>
 %postun
-<%= File.read(scripts["post-uninstall"]) %>
+<%= scripts[:after_remove] %>
 
 <% end -%>
 %files
-%defattr(-,root,root,-)
+%defattr(-,<%= attributes[:rpm_user] %>,<%= attributes[:rpm_group] %>,-)
 <%# Output config files and then regular files. -%>
-<%= @config_files.collect { |c| '%config ' + c }.join("\n") %>
-<%= paths.join("\n") %>
+<% config_files.each do |path| -%>
+%config(noreplace) <%= path %>
+<% end -%>
+<%# list only files, not directories? -%>
+<%= 
+  # Reject config files already listed or parent directories, then prefix files
+  # with "/", then make sure paths with spaces are quoted. I hate rpm so much.
+
+  # 'files' here is the method FPM::Package#files.
+  # The 'files' section of rpm can be 
+  # Replace [ with [\[] to make rpm not use globs
+  # Replace * with [*] to make rpm not use globs
+  files.collect { |f| "/#{f}" } \
+    .reject { |f| config_files.include?(f) } \
+    .collect { |f| f[/\s/] and "\"#{f}\"" or f } \
+    .collect { |f| f.gsub("[", "[\\[]") } \
+    .collect { |f| f.gsub("*", "[*]") } \
+    .join("\n") 
+%>
 
 %changelog

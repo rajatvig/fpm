@@ -11,3 +11,7 @@ fpm.wiki
 
 # RVM
 .rvmrc
+
+.yardoc
+coverage
+test/tmp
